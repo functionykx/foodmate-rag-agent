@@ -1,0 +1,9 @@
+case_id,query,expected_intent
+1,"预算80元，和同学吃工作日晚餐，想吃辣一点",recommendation
+2,"找一家安静、适合自习办公的咖啡店",recommendation
+3,"周五晚上两个人约会，预算每人120元",recommendation
+4,"想吃甜品，离学校近一点",recommendation
+5,"比较四种pipeline的MRR和NDCG",experiment
+6,"做一次A/B实验，分析推荐质量和延迟",experiment
+7,"评估hybrid链路的HitRate@5",experiment
+8,"诊断bge和cross encoder哪个效果更好",experiment

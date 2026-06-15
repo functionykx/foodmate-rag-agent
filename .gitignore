@@ -1,0 +1,74 @@
+# Python bytecode and test caches
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Virtual environments and local environment variables
+.env
+.env.*
+!.env.example
+.venv/
+venv/
+env/
+ENV/
+*.local
+
+# API keys, certificates, and local Streamlit secrets
+.streamlit/secrets.toml
+secrets.toml
+*.pem
+*.key
+*.p12
+*.pfx
+
+# IDE and operating-system files
+.vscode/
+.idea/
+*.code-workspace
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Runtime logs, databases, and user feedback
+work/
+logs/
+*.log
+*.sqlite
+*.sqlite3
+*.db
+reports/feedback.csv
+
+# Browser profiles may contain cookies and login sessions
+**/browser_profile/
+**/ke_browser_profile/
+
+# Raw/manual webpage captures and crawl artifacts
+data/raw/
+data/manual_ke/list_page.txt
+data/manual_ke/detail_pages/
+data/manual_ke/*.html
+data/manual_ke/*.json
+
+# Generated vector indexes and model artifacts
+vector_store/
+models/
+.cache/
+*.faiss
+*.index
+*.joblib
+*.npy
+*.npz
+*.bin
+*.safetensors
+*.onnx
+
+# Build and packaging output
+build/
+dist/
+*.egg-info/
+

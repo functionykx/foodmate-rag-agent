@@ -1,0 +1,9 @@
+﻿case_id,query,expected_intent,predicted_intent,route_correct,executed,task_success,retry_count,step_count,latency_ms
+1,预算80元，和同学吃工作日晚餐，想吃辣一点,recommendation,recommendation,1,0,,,,
+2,找一家安静、适合自习办公的咖啡店,recommendation,recommendation,1,0,,,,
+3,周五晚上两个人约会，预算每人120元,recommendation,recommendation,1,0,,,,
+4,想吃甜品，离学校近一点,recommendation,recommendation,1,0,,,,
+5,比较四种pipeline的MRR和NDCG,experiment,experiment,1,0,,,,
+6,做一次A/B实验，分析推荐质量和延迟,experiment,experiment,1,0,,,,
+7,评估hybrid链路的HitRate@5,experiment,experiment,1,0,,,,
+8,诊断bge和cross encoder哪个效果更好,experiment,experiment,1,0,,,,

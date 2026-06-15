@@ -1,0 +1,2 @@
+id,name,cuisine,price_per_person,rating,distance_km,location,opening_hours,tags,best_for,menu_highlights,review_summary,pros,cons,source
+1,示例小馆,中餐,45.0,4.5,0.8,学校东门,10:00-22:00,"中餐,平价,不辣,朋友聚餐","快速午餐,朋友聚餐","牛肉面,煎饺",离学校近，价格适合学生，口味温和。,离学校近;性价比高,饭点需要排队,manual_dianping
