@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+import json
+import os
+from pathlib import Path
+
 import pandas as pd
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
@@ -48,6 +52,79 @@ RELATED_CUISINES = {
     "韩餐": ["韩式料理", "韩式烤肉"],
     "泰国菜": ["泰餐", "东南亚菜"],
 }
+
+
+DEFAULT_RERANK_WEIGHTS = {
+    "semantic": 0.35,
+    "cuisine": 0.20,
+    "budget": 0.15,
+    "distance": 0.10,
+    "travel_time": 0.10,
+    "rating": 0.10,
+    "scene": 0.10,
+    "deal": 0.08,
+    "spicy": 0.08,
+    "feedback": 0.10,
+    "restaurant_quality": 0.08,
+}
+
+
+def load_rerank_weights(path: str | Path | None = None) -> dict[str, float]:
+    weights = dict(DEFAULT_RERANK_WEIGHTS)
+    configured = path or os.getenv("FOODMATE_RERANK_WEIGHTS_PATH")
+    candidate_paths = [Path(configured)] if configured else [
+        Path("configs/rerank_weights.yaml"),
+        Path("configs/rerank_weights.yml"),
+        Path("configs/rerank_weights.json"),
+    ]
+    weight_path = next((candidate for candidate in candidate_paths if candidate.exists()), None)
+    if weight_path is None:
+        return weights
+    loaded = _load_weight_file(weight_path)
+    for key, value in loaded.items():
+        if key not in weights:
+            continue
+        try:
+            weights[key] = float(value)
+        except (TypeError, ValueError):
+            continue
+    return weights
+
+
+def _load_weight_file(weight_path: Path) -> dict[str, float]:
+    try:
+        text = weight_path.read_text(encoding="utf-8")
+    except OSError:
+        return {}
+    text = text.lstrip("\ufeff")
+    suffix = weight_path.suffix.lower()
+    if suffix == ".json":
+        try:
+            loaded = json.loads(text)
+        except json.JSONDecodeError:
+            return {}
+        return loaded if isinstance(loaded, dict) else {}
+    if suffix in {".yaml", ".yml"}:
+        return _parse_simple_yaml_mapping(text)
+    return {}
+
+
+def _parse_simple_yaml_mapping(text: str) -> dict[str, float]:
+    result: dict[str, float] = {}
+    for raw_line in text.splitlines():
+        line = raw_line.split("#", 1)[0].strip()
+        if not line or ":" not in line:
+            continue
+        key, value = line.split(":", 1)
+        key = key.strip().strip("'\"")
+        value = value.strip().strip("'\"")
+        if not key:
+            continue
+        try:
+            result[key] = float(value)
+        except ValueError:
+            continue
+    return result
 
 
 def _field_text(row: pd.Series) -> str:
@@ -189,6 +266,7 @@ def deal_match(row: pd.Series, preferences: dict) -> float:
 
 def rerank(candidates: pd.DataFrame, preferences: dict, top_k: int = 5) -> pd.DataFrame:
     candidates = candidates.copy()
+    weights = load_rerank_weights()
     cuisine = preferences.get("cuisine")
     if cuisine:
         cuisine_pool = candidates[candidates.apply(lambda row: cuisine_match(row, preferences) >= 0.9, axis=1)]
@@ -233,17 +311,21 @@ def rerank(candidates: pd.DataFrame, preferences: dict, top_k: int = 5) -> pd.Da
             "scene": scene_match(row, preferences),
             "deal": deal_match(row, preferences),
             "spicy": spicy_match(row, preferences),
+            "feedback": float(row.get("feedback_boost", 0.0)),
+            "restaurant_quality": float(row.get("restaurant_quality_score", 0.5)),
         }
         score = (
-            0.35 * parts["semantic"]
-            + 0.20 * parts["cuisine"]
-            + 0.15 * parts["budget"]
-            + 0.10 * parts["distance"]
-            + 0.10 * parts["travel_time"]
-            + 0.10 * parts["rating"]
-            + 0.10 * parts["scene"]
-            + 0.08 * parts["deal"]
-            + 0.08 * parts["spicy"]
+            weights["semantic"] * parts["semantic"]
+            + weights["cuisine"] * parts["cuisine"]
+            + weights["budget"] * parts["budget"]
+            + weights["distance"] * parts["distance"]
+            + weights["travel_time"] * parts["travel_time"]
+            + weights["rating"] * parts["rating"]
+            + weights["scene"] * parts["scene"]
+            + weights["deal"] * parts["deal"]
+            + weights["spicy"] * parts["spicy"]
+            + weights["feedback"] * parts["feedback"]
+            + weights["restaurant_quality"] * parts["restaurant_quality"]
             - dietary_penalty(row, preferences)
             - budget_range_penalty(row, preferences)
         )

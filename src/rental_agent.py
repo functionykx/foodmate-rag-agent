@@ -52,15 +52,20 @@ def extract_rental_preferences(text: str) -> dict[str, Any]:
     prefs: dict[str, Any] = {}
     normalized = str(text).replace(",", "，")
 
-    occupant_match = re.search(r"(\d+|[一二两三四五六])\s*(?:人|个人)(?:一起)?(?:合租|住)", normalized)
+    occupant_match = re.search(
+        r"(\d+|[一二两三四五六])\s*(?:人|个人)(?:一起)?(?:合租|租|住|入住)",
+        normalized,
+    )
     if occupant_match:
         raw_count = occupant_match.group(1)
         prefs["occupant_count"] = int(raw_count) if raw_count.isdigit() else {
             "一": 1, "二": 2, "两": 2, "三": 3, "四": 4, "五": 5, "六": 6,
         }[raw_count]
+    elif any(token in normalized for token in ["单人", "一个人", "自己住", "独居"]):
+        prefs["occupant_count"] = 1
 
     per_person_match = re.search(
-        r"(?:预算|租金|月租)?\s*(?:人均|每人)\s*(\d{3,5})\s*(?:元)?\s*(?:以内|以下|左右)?",
+        r"(?:(?:预算|租金|月租)\s*)?(?:人均|每人)\s*(?:预算|租金|月租)?\s*(\d{3,5})\s*(?:元)?\s*(?:以内|以下|左右)?",
         normalized,
     )
     if per_person_match:
@@ -104,6 +109,8 @@ def extract_rental_preferences(text: str) -> dict[str, Any]:
             break
     if "开间" in normalized or "单间" in normalized:
         prefs.setdefault("bedrooms", 1)
+    if prefs.get("occupant_count") == 1 and any(token in normalized for token in ["单人", "一个人", "自己住", "独居"]):
+        prefs.setdefault("bedrooms", 1)
 
     area_match = re.search(r"(\d+(?:\.\d+)?)\s*(?:平|平方米|㎡)\s*(?:以上|起)", normalized)
     if area_match:
@@ -122,7 +129,9 @@ def extract_rental_preferences(text: str) -> dict[str, Any]:
         rental_type = "整租"
     if rental_type:
         prefs["rental_type"] = rental_type
-    if prefs.get("occupant_count", 0) >= 2 and rental_type == "合租":
+    if prefs.get("occupant_count", 0) >= 2 and (
+        rental_type == "合租" or any(token in normalized for token in ["一起租", "一起住", "朋友", "室友"])
+    ):
         # "两人合租" describes a household searching together, not
         # necessarily a platform listing whose rental type is shared-room.
         prefs["co_rent_group"] = True
@@ -276,7 +285,7 @@ def rerank_rentals(candidates: pd.DataFrame, preferences: dict[str, Any], top_k:
         budget_pool = pool[
             pd.to_numeric(pool["monthly_rent"], errors="coerce") <= float(preferences["max_rent"])
         ]
-        if not budget_pool.empty:
+        if len(budget_pool) >= top_k:
             pool = budget_pool
     if preferences.get("bedrooms"):
         narrow(pd.to_numeric(pool["bedrooms"], errors="coerce") == int(preferences["bedrooms"]))
@@ -341,6 +350,10 @@ def rerank_rentals(candidates: pd.DataFrame, preferences: dict[str, Any], top_k:
             0.04 * rental_type_score + 0.03 * move_in_score + 0.03 * lease_score +
             0.13 * commute_score
         )
+        max_rent = preferences.get("max_rent")
+        if max_rent and rent > float(max_rent):
+            over_ratio = (rent - float(max_rent)) / max(float(max_rent), 1.0)
+            final -= min(0.35, 0.16 + over_ratio * 0.25)
         enriched = row.to_dict()
         enriched.update({
             "final_score": final,

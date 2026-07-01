@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import socket
 import urllib.error
 import urllib.request
 from typing import Any
@@ -43,7 +44,14 @@ class LLMClient:
             with urllib.request.urlopen(req, timeout=self.timeout) as resp:
                 data = json.loads(resp.read().decode("utf-8"))
             return data["choices"][0]["message"]["content"]
-        except (urllib.error.URLError, urllib.error.HTTPError, KeyError, json.JSONDecodeError):
+        except (
+            TimeoutError,
+            socket.timeout,
+            urllib.error.URLError,
+            urllib.error.HTTPError,
+            KeyError,
+            json.JSONDecodeError,
+        ):
             return None
 
 

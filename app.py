@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import os
+import uuid
 from pathlib import Path
 
 import pandas as pd
 import streamlit as st
 
+from src.feedback import log_feedback
 from src.llm import llm_enabled
 from src.multi_agent import SupervisorAgent
 
@@ -31,6 +33,8 @@ with st.sidebar:
     restaurant_data = Path(os.getenv("FOODMATE_DATA_PATH", default_restaurant_data)).name
     st.caption(f"餐厅数据源：{restaurant_data}")
     st.caption(f"LLM：{'已启用' if llm_enabled() else '未启用，使用规则与模板'}")
+    st.subheader("用户记忆")
+    st.session_state["user_id"] = st.text_input("用户 ID", value=st.session_state.get("user_id", "default_user"))
     independent_mode = st.checkbox("每次输入独立推荐", value=False)
     user_location = st.text_input(
         "地点（餐厅出发点 / 租房通勤目的地）",
@@ -52,11 +56,26 @@ with st.sidebar:
         agent.reset()
         st.session_state["messages"] = []
         st.session_state["awaiting_followup"] = False
+        st.session_state["feedback_status_messages"] = []
+        st.session_state["feedback_status_by_item"] = {}
+        st.session_state["submitted_feedback_keys"] = []
 
 if "messages" not in st.session_state:
     st.session_state["messages"] = []
 if "awaiting_followup" not in st.session_state:
     st.session_state["awaiting_followup"] = False
+if "session_id" not in st.session_state:
+    st.session_state["session_id"] = str(uuid.uuid4())
+if "user_id" not in st.session_state:
+    st.session_state["user_id"] = "default_user"
+if "last_feedback_context" not in st.session_state:
+    st.session_state["last_feedback_context"] = {}
+if "feedback_status_messages" not in st.session_state:
+    st.session_state["feedback_status_messages"] = []
+if "feedback_status_by_item" not in st.session_state:
+    st.session_state["feedback_status_by_item"] = {}
+if "submitted_feedback_keys" not in st.session_state:
+    st.session_state["submitted_feedback_keys"] = []
 
 for message in st.session_state["messages"]:
     with st.chat_message(message["role"]):
@@ -88,6 +107,7 @@ if user_input:
         else:
             agent_input += f"。当前位置：{user_location}。出行方式：{transport_label}"
 
+    os.environ["FOODMATE_USER_ID"] = st.session_state["user_id"]
     result = agent.run(agent_input)
     st.session_state["awaiting_followup"] = result["type"] == "followup"
     st.session_state["messages"].append({"role": "assistant", "content": result["message"]})
@@ -96,10 +116,16 @@ if user_input:
 
     recs = result.get("recommendations")
     if result["type"] == "recommendation" and recs is not None and not recs.empty:
+        st.session_state["last_feedback_context"] = {
+            "query": agent_input,
+            "preferences": result.get("preferences", {}),
+            "recommendations": recs.copy(),
+        }
         st.subheader("餐厅 Top 5")
         display_cols = [
             "name", "cuisine", "price_per_person", "rating", "distance_km", "final_score",
             "semantic_score", "budget_score", "distance_score", "cuisine_score", "scene_score", "deal_score",
+            "feedback_boost", "restaurant_quality_score",
         ]
         display_cols = [column for column in display_cols if column in recs.columns]
         st.dataframe(recs[display_cols], use_container_width=True, hide_index=True)
@@ -164,3 +190,77 @@ with st.sidebar:
     st.code(agent.state.intent)
     st.subheader("当前偏好")
     st.json(agent.state.preferences)
+
+
+def _feedback_features(row: pd.Series) -> dict:
+    columns = [
+        "cuisine", "price_per_person", "rating", "distance_km", "final_score",
+        "semantic_score", "budget_score", "distance_score", "travel_time_score",
+        "cuisine_score", "scene_score", "deal_score", "spicy_score",
+        "feedback_boost", "restaurant_quality_score",
+    ]
+    return {column: row.get(column) for column in columns if column in row.index and pd.notna(row.get(column))}
+
+
+feedback_context = st.session_state.get("last_feedback_context", {})
+feedback_recs = feedback_context.get("recommendations")
+if isinstance(feedback_recs, pd.DataFrame) and not feedback_recs.empty:
+    with st.expander("给本次餐厅推荐反馈", expanded=False):
+        st.caption("反馈会写入 reports/feedback.csv，并在下一次推荐中影响用户画像、餐厅质量分和排序。")
+        feedback_options = [
+            ("👍 喜欢", "like", ""),
+            ("😐 一般", "neutral", "一般"),
+            ("👎 不喜欢", "dislike", ""),
+            ("太贵", "negative", "太贵"),
+            ("太远", "negative", "太远"),
+            ("不想吃这个菜系", "negative", "不想吃这个菜系"),
+            ("环境不合适", "negative", "环境不合适"),
+            ("已去过", "neutral", "已去过"),
+        ]
+        for rank, row in feedback_recs.reset_index(drop=True).iterrows():
+            item_id = str(row.get("restaurant_id", row.get("name", "")))
+            st.write(f"{rank + 1}. {row['name']}")
+            cols = st.columns(len(feedback_options))
+            for col, (label, feedback_type, reason) in zip(cols, feedback_options):
+                if col.button(label, key=f"fb_{st.session_state['session_id']}_{rank}_{label}"):
+                    feedback_key = "|".join([
+                        st.session_state["session_id"],
+                        item_id,
+                        feedback_type,
+                        reason,
+                    ])
+                    if feedback_key in st.session_state["submitted_feedback_keys"]:
+                        st.session_state["feedback_status_by_item"].setdefault(item_id, []).append(
+                            ("warning", f"本轮已记录过：{label}，不会重复计权。")
+                        )
+                        st.rerun()
+                    saved = log_feedback(
+                        query=feedback_context.get("query", ""),
+                        restaurant_name=str(row["name"]),
+                        feedback=feedback_type,
+                        reason=reason,
+                        user_id=st.session_state["user_id"],
+                        session_id=st.session_state["session_id"],
+                        domain="restaurant",
+                        item_id=item_id,
+                        item_name=str(row["name"]),
+                        rank=rank + 1,
+                        final_score=float(row.get("final_score", 0.0)),
+                        preferences=feedback_context.get("preferences", {}),
+                        features=_feedback_features(row),
+                    )
+                    st.session_state["submitted_feedback_keys"].append(feedback_key)
+                    if saved.get("deduped"):
+                        st.session_state["feedback_status_by_item"].setdefault(item_id, []).append(
+                            ("warning", f"本轮已记录过：{label}，不会重复计权。")
+                        )
+                    else:
+                        st.session_state["feedback_status_by_item"].setdefault(item_id, []).append(
+                            ("success", f"已记录反馈：{label}")
+                        )
+                    st.rerun()
+            for level, message in st.session_state["feedback_status_by_item"].get(item_id, [])[-3:]:
+                if level == "warning":
+                    st.warning(message)
+                else:
+                    st.success(message)

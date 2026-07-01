@@ -2,14 +2,14 @@ from __future__ import annotations
 
 from typing import Optional
 
-from src.feedback import log_feedback, load_feedback
+from src.feedback import build_user_profile, log_feedback, load_feedback, restaurant_quality_scores
 from src.multi_agent import RecommendationAgent, SupervisorAgent
 from src.rental_agent import RentalAgent
 from src.retriever import RestaurantRetriever
 
 try:
     from fastapi import FastAPI
-    from pydantic import BaseModel
+    from pydantic import BaseModel, Field
 except ImportError as exc:  # pragma: no cover
     raise SystemExit(
         "FastAPI is not installed. Run: pip install fastapi uvicorn"
@@ -33,6 +33,15 @@ class FeedbackRequest(BaseModel):
     restaurant_name: str
     feedback: str
     reason: Optional[str] = ""
+    user_id: str = "default_user"
+    session_id: str = ""
+    domain: str = "restaurant"
+    item_id: str = ""
+    item_name: Optional[str] = None
+    rank: Optional[int] = None
+    final_score: Optional[float] = None
+    preferences: dict = Field(default_factory=dict)
+    features: dict = Field(default_factory=dict)
 
 
 class AgentRequest(BaseModel):
@@ -131,6 +140,15 @@ def feedback(req: FeedbackRequest):
         restaurant_name=req.restaurant_name,
         feedback=req.feedback,
         reason=req.reason or "",
+        user_id=req.user_id,
+        session_id=req.session_id,
+        domain=req.domain,
+        item_id=req.item_id,
+        item_name=req.item_name,
+        rank=req.rank,
+        final_score=req.final_score,
+        preferences=req.preferences,
+        features=req.features,
     )
     return {"status": "ok", "feedback": row}
 
@@ -138,3 +156,11 @@ def feedback(req: FeedbackRequest):
 @app.get("/feedback")
 def feedback_rows():
     return {"rows": load_feedback().to_dict(orient="records")}
+
+
+@app.get("/feedback/profile/{user_id}")
+def feedback_profile(user_id: str):
+    return {
+        "user_profile": build_user_profile(user_id=user_id),
+        "restaurant_quality_scores": restaurant_quality_scores(),
+    }

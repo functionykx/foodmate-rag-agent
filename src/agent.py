@@ -12,7 +12,7 @@ from src.reranker import cuisine_match, rerank, spicy_match
 from src.retriever import RestaurantRetriever
 from src.utils import contains_any, normalize_text
 from src.llm import extract_preferences_with_llm, generate_recommendation_text, llm_enabled
-from src.feedback import load_feedback
+from src.feedback import build_user_profile, restaurant_quality_scores
 from src.tools.baidu_map import BaiduMapError, BaiduMapTool
 
 
@@ -88,8 +88,11 @@ class FoodMateAgent:
 
         recommendations = self.state.recommendations
         message = None
+        answer_source = "template"
         if llm_enabled():
             message = generate_recommendation_text(user_message, self.state.preferences, recommendations)
+            if message:
+                answer_source = "llm"
         if not message:
             message = render_recommendations(recommendations, self.state.preferences)
         if 0 < len(recommendations) < 5:
@@ -97,7 +100,7 @@ class FoodMateAgent:
                 f"在菜系与预算上浮 15% 容差内只有 {len(recommendations)} 家，"
                 "未使用其他菜系凑数。\n\n" + message
             )
-        self._record_action("answer", "generate_response", {"source": "llm" if llm_enabled() else "template"})
+        self._record_action("answer", "generate_response", {"source": answer_source})
         return {
             "type": "recommendation",
             "message": message,
@@ -167,19 +170,30 @@ class FoodMateAgent:
         self._record_action("planner", "build_plan", {"plan": plan})
 
     def _memory_lookup(self, user_message: str) -> None:
-        feedback = load_feedback()
-        if feedback.empty:
-            memory = {"liked": [], "disliked": [], "avoid_reasons": []}
-        else:
-            liked_mask = feedback["feedback"].astype(str).str.contains("喜欢|满意|好", regex=True, na=False)
-            disliked_mask = feedback["feedback"].astype(str).str.contains("不喜欢|太贵|太远|不好吃|不想吃|差", regex=True, na=False)
-            memory = {
-                "liked": feedback.loc[liked_mask, "restaurant_name"].dropna().tail(10).tolist(),
-                "disliked": feedback.loc[disliked_mask, "restaurant_name"].dropna().tail(10).tolist(),
-                "avoid_reasons": feedback.loc[disliked_mask, "feedback"].dropna().tail(10).tolist(),
-            }
+        user_id = os.getenv("FOODMATE_USER_ID", "default_user")
+        profile = build_user_profile(user_id=user_id)
+        quality_scores = restaurant_quality_scores()
+        memory = {
+            **profile,
+            "restaurant_quality_scores": quality_scores,
+            "liked": list(profile["liked_restaurants"].keys())[-10:],
+            "disliked": list(profile["disliked_restaurants"].keys())[-10:],
+        }
         self.state.memory = memory
-        self._record_action("memory", "load_feedback_memory", memory)
+        self._record_action(
+            "memory",
+            "load_feedback_memory",
+            {
+                "user_id": user_id,
+                "liked": memory["liked"],
+                "disliked": memory["disliked"],
+                "liked_cuisines": profile["liked_cuisines"],
+                "disliked_cuisines": profile["disliked_cuisines"],
+                "price_sensitivity": profile["price_sensitivity"],
+                "distance_sensitivity": profile["distance_sensitivity"],
+                "restaurant_quality_count": len(quality_scores),
+            },
+        )
 
     def _clarification_node(self) -> list[str]:
         missing = missing_required_fields(self.state.preferences)
@@ -227,12 +241,25 @@ class FoodMateAgent:
             self._record_action("tool_router", "baidu_map_skipped", self.state.map_context)
             return
         try:
+            route_top_k = max(1, int(os.getenv("FOODMATE_MAP_ROUTE_TOP_K", "10")))
+            original_candidate_count = len(self.state.candidates)
+            route_candidates = self.state.candidates
+            if original_candidate_count > route_top_k:
+                if self.pipeline_mode.endswith("business_rerank") or self.pipeline_mode == "hybrid":
+                    route_candidates = rerank(self.state.candidates, self.state.preferences, top_k=route_top_k)
+                else:
+                    route_candidates = basic_top_k(self.state.candidates, top_k=route_top_k)
             candidates, context = self.map_tool.update_candidate_distances(
-                str(user_location), self.state.candidates, transport_mode=transport_mode
+                str(user_location), route_candidates, transport_mode=transport_mode
             )
             self.state.candidates = candidates
-            self.state.map_context = context
-            self._record_action("tool_router", f"baidu_{transport_mode}_route", context)
+            self.state.map_context = {
+                **context,
+                "route_top_k": route_top_k,
+                "candidate_count_before_route_prerank": original_candidate_count,
+                "candidate_count_after_route_prerank": len(route_candidates),
+            }
+            self._record_action("tool_router", f"baidu_{transport_mode}_route", self.state.map_context)
         except BaiduMapError as exc:
             self.state.map_context = {
                 "enabled": False,
@@ -245,7 +272,7 @@ class FoodMateAgent:
         if self.state.candidates.empty:
             self.state.recommendations = pd.DataFrame()
             return
-        candidates = self.state.candidates
+        candidates = self._attach_feedback_features(self.state.candidates)
         if self.pending_critic_feedback:
             candidates, strategy = self._constrain_candidates(candidates, self.pending_critic_feedback)
             self._record_action("ranking_agent", "critic_feedback_applied", strategy)
@@ -259,6 +286,58 @@ class FoodMateAgent:
         self.state.recommendations = recommendations
         self._record_action("ranking_agent", action, {"num_recommendations": len(recommendations)})
 
+    def _attach_feedback_features(self, candidates: pd.DataFrame) -> pd.DataFrame:
+        memory = self.state.memory or {}
+        if candidates.empty:
+            return candidates
+        liked_restaurants = memory.get("liked_restaurants", {})
+        disliked_restaurants = memory.get("disliked_restaurants", {})
+        liked_cuisines = memory.get("liked_cuisines", {})
+        disliked_cuisines = memory.get("disliked_cuisines", {})
+        quality_scores = memory.get("restaurant_quality_scores", {})
+        price_sensitivity = float(memory.get("price_sensitivity", 0.5) or 0.5)
+        distance_sensitivity = float(memory.get("distance_sensitivity", 0.5) or 0.5)
+
+        def boost(row: pd.Series) -> float:
+            name = str(row.get("name", ""))
+            cuisine = str(row.get("cuisine", ""))
+            score = 0.0
+            score += min(0.16, 0.08 * float(liked_restaurants.get(name, 0)))
+            score -= min(0.30, 0.15 * float(disliked_restaurants.get(name, 0)))
+            score += min(0.10, 0.035 * float(liked_cuisines.get(cuisine, 0)))
+            score -= min(0.18, 0.08 * float(disliked_cuisines.get(cuisine, 0)))
+            if self.state.preferences.get("budget") and price_sensitivity > 0.5:
+                try:
+                    price = float(row.get("price_per_person", 0))
+                    budget = float(self.state.preferences["budget"])
+                    if price > budget:
+                        score -= min(0.18, (price_sensitivity - 0.5) * 0.20)
+                except (TypeError, ValueError):
+                    pass
+            if self.state.preferences.get("max_distance_km") and distance_sensitivity > 0.5:
+                try:
+                    distance = float(row.get("effective_distance_km", row.get("distance_km", 0)))
+                    max_distance = float(self.state.preferences["max_distance_km"])
+                    if distance > max_distance:
+                        score -= min(0.18, (distance_sensitivity - 0.5) * 0.20)
+                except (TypeError, ValueError):
+                    pass
+            return round(score, 4)
+
+        result = candidates.copy()
+        result["feedback_boost"] = result.apply(boost, axis=1)
+        result["restaurant_quality_score"] = result["name"].map(quality_scores).fillna(0.5).astype(float)
+        self._record_action(
+            "memory",
+            "attach_feedback_features",
+            {
+                "candidates": len(result),
+                "nonzero_feedback_boost": int((result["feedback_boost"] != 0).sum()),
+                "quality_scored": int(result["name"].isin(quality_scores.keys()).sum()),
+            },
+        )
+        return result
+
     def _memory_rerank_tool(self) -> None:
         recs = self.state.recommendations
         if recs.empty:
@@ -269,7 +348,7 @@ class FoodMateAgent:
             self._record_action("memory", "memory_rerank_skipped", {"reason": "no_feedback"})
             return
         recs = recs.copy()
-        recs["memory_score"] = recs["name"].apply(lambda name: 0.08 if name in liked else (-0.15 if name in disliked else 0.0))
+        recs["memory_score"] = recs["name"].apply(lambda name: 0.04 if name in liked else (-0.08 if name in disliked else 0.0))
         recs["final_score"] = recs["final_score"].astype(float) + recs["memory_score"]
         self.state.recommendations = recs.sort_values("final_score", ascending=False).reset_index(drop=True)
         self._record_action("memory", "apply_feedback_memory", {"liked": list(liked), "disliked": list(disliked)})

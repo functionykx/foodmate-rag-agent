@@ -72,3 +72,5 @@ build/
 dist/
 *.egg-info/
 
+security_scan.txt
+scan_output.txt

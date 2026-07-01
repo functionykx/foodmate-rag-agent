@@ -1,0 +1,13 @@
+{
+  "semantic": 0.35,
+  "cuisine": 0.2,
+  "budget": 0.15,
+  "distance": 0.1,
+  "travel_time": 0.1,
+  "rating": 0.1,
+  "scene": 0.1,
+  "deal": 0.08,
+  "spicy": 0.08,
+  "feedback": 0.1,
+  "restaurant_quality": 0.08
+}
